@@ -148,6 +148,7 @@ class NeuralOperatorTrainer:
                 self.optimizer.zero_grad()
                 if self.model_type == "FNO":
                     pred = self.model(batch_X)
+                    pred = pred.reshape(batch_X.size(0), -1)   # flatten to (batch, n_assets*n_assets)
                 elif self.model_type == "DeepONet":
                     batch_X_flat = self._flatten_covariance(batch_X)
                     n_pairs = batch_X.shape[1] * batch_X.shape[2]
@@ -156,7 +157,7 @@ class NeuralOperatorTrainer:
                 else:
                     batch_X_flat = self._flatten_covariance(batch_X)
                     pred = self.model(batch_X_flat)
-                loss = self.criterion(pred, batch_y.reshape(batch_X.size(0), -1))
+                loss = self.criterion(pred, batch_y)
                 loss.backward()
                 self.optimizer.step()
                 train_loss += loss.item() * batch_X.size(0)
@@ -167,7 +168,7 @@ class NeuralOperatorTrainer:
                 X_val_t = torch.tensor(X_val, dtype=torch.float32).to(self.device)
                 y_val_t = torch.tensor(y_val, dtype=torch.float32).to(self.device)
                 if self.model_type == "FNO":
-                    pred_val = self.model(X_val_t)
+                    pred_val = self.model(X_val_t).reshape(X_val.shape[0], -1)
                 elif self.model_type == "DeepONet":
                     X_val_flat = self._flatten_covariance(X_val_t)
                     n_pairs = X_val.shape[1] * X_val.shape[2]
@@ -176,7 +177,7 @@ class NeuralOperatorTrainer:
                 else:
                     X_val_flat = self._flatten_covariance(X_val_t)
                     pred_val = self.model(X_val_flat)
-                val_loss = self.criterion(pred_val, y_val_t.reshape(X_val.shape[0], -1)).item()
+                val_loss = self.criterion(pred_val, y_val_t).item()
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -205,7 +206,7 @@ class NeuralOperatorTrainer:
         X_t = torch.tensor(X, dtype=torch.float32).to(self.device)
         with torch.no_grad():
             if self.model_type == "FNO":
-                pred = self.model(X_t).cpu().numpy()
+                pred = self.model(X_t).reshape(X.shape[0], -1).cpu().numpy()
             elif self.model_type == "DeepONet":
                 X_flat = self._flatten_covariance(X_t)
                 n_pairs = X.shape[1] * X.shape[2]
