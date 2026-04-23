@@ -49,23 +49,24 @@ def compute_covariance_surface(returns: pd.DataFrame, window: int = 63) -> np.nd
         covs.append(cov)
     return np.stack(covs)
 
-def compute_margrabe_price(S1: np.ndarray, S2: np.ndarray, sigma1: float, sigma2: float, rho: float,
+def compute_margrabe_price(S1: float, S2: float, sigma1: float, sigma2: float, rho: float,
                           T: float = 1.0, r: float = 0.02) -> float:
     """
-    Compute Margrabe exchange option price.
-    C = S1 * N(d1) - S2 * N(d2)
-    where d1 = (ln(S1/S2) + (sigma^2/2)*T) / (sigma * sqrt(T))
-          d2 = d1 - sigma * sqrt(T)
-          sigma = sqrt(sigma1^2 + sigma2^2 - 2*rho*sigma1*sigma2)
+    Compute Margrabe exchange option price with numerical safeguards.
     """
     from scipy.stats import norm
-    sigma = np.sqrt(sigma1**2 + sigma2**2 - 2 * rho * sigma1 * sigma2)
-    if sigma < 1e-6:
-        return max(S1 - S2, 0)
-    d1 = (np.log(S1 / S2) + 0.5 * sigma**2 * T) / (sigma * np.sqrt(T))
+    sigma_sq = sigma1**2 + sigma2**2 - 2 * rho * sigma1 * sigma2
+    if sigma_sq <= 1e-12:
+        return max(S1 - S2, 0.0)
+    sigma = np.sqrt(sigma_sq)
+    if sigma < 1e-8:
+        return max(S1 - S2, 0.0)
+    if S2 <= 0 or S1 <= 0:
+        return 0.0
+    d1 = (np.log(S1 / S2) + 0.5 * sigma_sq * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
     price = S1 * norm.cdf(d1) - S2 * norm.cdf(d2)
-    return price
+    return max(price, 0.0)
 
 def generate_training_data(returns: pd.DataFrame, window: int = 63) -> tuple:
     """
@@ -79,15 +80,14 @@ def generate_training_data(returns: pd.DataFrame, window: int = 63) -> tuple:
     n_assets = len(tickers)
     n_samples = covs.shape[0]
 
-    # Compute annualized volatilities and correlations from each covariance matrix
     targets = np.zeros((n_samples, n_assets, n_assets))
     for i in range(n_samples):
         cov = covs[i]
-        # Scale to annual
         cov_annual = cov * 252
-        vols = np.sqrt(np.diag(cov_annual))
-        corr = cov_annual / np.outer(vols, vols + 1e-6)
-        # Use the last price of the window as current price
+        vols = np.sqrt(np.maximum(np.diag(cov_annual), 1e-12))
+        corr = cov_annual / np.outer(vols, vols + 1e-12)
+        np.fill_diagonal(corr, 1.0)
+        corr = np.clip(corr, -1.0, 1.0)
         S = returns.iloc[i+window-1].values
         for j in range(n_assets):
             for k in range(n_assets):
