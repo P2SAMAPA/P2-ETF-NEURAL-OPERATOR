@@ -26,34 +26,34 @@ UNIVERSES = {
 }
 
 # --- Training Data ---
-TRAIN_START = "2008-01-01"          # Use full history
-TRAIN_END = "2026-04-23"            # YTD
-VALIDATION_SPLIT = 0.2              # Portion of data for validation
-MIN_OBSERVATIONS = 252              # Minimum data required per ETF
+TRAIN_START = "2008-01-01"
+TRAIN_END = "2026-04-23"
+VALIDATION_SPLIT = 0.2
+MIN_OBSERVATIONS = 252
 
-# --- FNO Parameters ---
-MODEL_TYPE = "FNO"                  # "FNO", "DeepONet", or "MLP" (fallback)
-FNO_MODES = 16                      # Number of Fourier modes
-FNO_HIDDEN_CHANNELS = 64            # Hidden channel dimension
-FNO_N_LAYERS = 4                    # Number of Fourier layers
-FNO_DOMAIN_PADDING = 0.1            # Padding fraction for FNO
+# --- FNO Parameters (Increased Capacity) ---
+MODEL_TYPE = "FNO"
+FNO_MODES = 24                       # Increased from 16
+FNO_HIDDEN_CHANNELS = 96             # Increased from 64
+FNO_N_LAYERS = 6                     # Increased from 4
+FNO_DOMAIN_PADDING = 0.1
 
 # --- Training Parameters ---
-BATCH_SIZE = 32
-LEARNING_RATE = 0.001
-WEIGHT_DECAY = 1e-4
-EPOCHS = 100                        # Full training epochs
-EARLY_STOP_PATIENCE = 10
+BATCH_SIZE = 64                      # Increased batch size
+LEARNING_RATE = 0.0005               # Slightly lower LR for stability
+WEIGHT_DECAY = 1e-5
+EPOCHS = 150                         # More epochs
+EARLY_STOP_PATIENCE = 15
+RANKING_LOSS_WEIGHT = 0.3            # Weight for pairwise ranking loss
 RANDOM_SEED = 42
 
 # --- Runtime Fallback ---
-# If training exceeds MAX_RUNTIME_SECONDS, switch to simpler model
-MAX_RUNTIME_SECONDS = 18000         # 5 hours (leave 1 hour buffer)
-FALLBACK_MODEL = "MLP"              # "DeepONet" or "MLP"
+MAX_RUNTIME_SECONDS = 18000
+FALLBACK_MODEL = "MLP"
 
 # --- Option Pricing Parameters ---
-RISK_FREE_RATE = 0.02               # Annualized
-TIME_TO_MATURITY = 1.0              # 1 year
+RISK_FREE_RATE = 0.02
+TIME_TO_MATURITY = 1.0
 
 # --- Date Handling ---
 TODAY = datetime.now().strftime("%Y-%m-%d")
