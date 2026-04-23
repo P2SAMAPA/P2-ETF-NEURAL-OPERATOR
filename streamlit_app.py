@@ -93,6 +93,11 @@ for tab, key in zip(tabs, universe_keys):
             st.markdown("### All ETFs")
             all_rows = []
             for t, s in universe_data.items():
-                all_rows.append({"Ticker": t, "Score": f"{s:.4f}"})
+                # Safeguard against non-numeric values
+                try:
+                    score_str = f"{float(s):.4f}"
+                except (ValueError, TypeError):
+                    score_str = "N/A"
+                all_rows.append({"Ticker": t, "Score": score_str})
             df_all = pd.DataFrame(all_rows).sort_values("Score", ascending=False)
             st.dataframe(df_all, use_container_width=True, hide_index=True)
