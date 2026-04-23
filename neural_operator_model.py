@@ -1,5 +1,5 @@
 """
-Neural Operator models: Fourier Neural Operator (FNO), DeepONet, and MLP fallback.
+Neural Operator models: Fourier Neural Operator (FNO) with ranking loss.
 """
 
 import torch
@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import time
-import config  # <-- Add this import
+import config
 
 class SpectralConv2d(nn.Module):
     def __init__(self, in_channels, out_channels, modes1, modes2):
@@ -66,28 +66,6 @@ class FNO2d(nn.Module):
         x = self.fc2(x).squeeze(-1)
         return x
 
-class DeepONet(nn.Module):
-    def __init__(self, branch_input_dim, trunk_input_dim=1, hidden_dim=128, n_layers=3):
-        super().__init__()
-        self.branch_net = self._build_mlp(branch_input_dim, hidden_dim, hidden_dim, n_layers)
-        self.trunk_net = self._build_mlp(trunk_input_dim, hidden_dim, hidden_dim, n_layers)
-        self.final_bias = nn.Parameter(torch.zeros(1))
-
-    def _build_mlp(self, in_dim, hidden_dim, out_dim, n_layers):
-        layers = []
-        layers.append(nn.Linear(in_dim, hidden_dim))
-        layers.append(nn.ReLU())
-        for _ in range(n_layers - 1):
-            layers.append(nn.Linear(hidden_dim, hidden_dim))
-            layers.append(nn.ReLU())
-        layers.append(nn.Linear(hidden_dim, out_dim))
-        return nn.Sequential(*layers)
-
-    def forward(self, x_branch, x_trunk):
-        b = self.branch_net(x_branch)
-        t = self.trunk_net(x_trunk)
-        return torch.sum(b * t, dim=1, keepdim=True) + self.final_bias
-
 class MLPRegressor(nn.Module):
     def __init__(self, input_dim, hidden_dims=[256, 128, 64]):
         super().__init__()
@@ -105,30 +83,42 @@ class MLPRegressor(nn.Module):
 
 class NeuralOperatorTrainer:
     def __init__(self, model_type="FNO", n_assets=23, modes=16, width=64, n_layers=4,
-                 lr=0.001, weight_decay=1e-4, seed=42):
+                 lr=0.001, weight_decay=1e-4, ranking_weight=0.3, seed=42):
         torch.manual_seed(seed)
         np.random.seed(seed)
         self.model_type = model_type
         self.n_assets = n_assets
+        self.ranking_weight = ranking_weight
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         if model_type == "FNO":
             effective_modes = min(modes, n_assets // 2 + 1)
             self.model = FNO2d(effective_modes, effective_modes, width, n_layers, padding=0.1).to(self.device)
-        elif model_type == "DeepONet":
-            branch_dim = n_assets * n_assets
-            self.model = DeepONet(branch_dim, trunk_input_dim=2, hidden_dim=width, n_layers=n_layers).to(self.device)
         else:
             input_dim = n_assets * n_assets
             self.model = MLPRegressor(input_dim, hidden_dims=[256, 128, 64]).to(self.device)
 
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay)
-        self.criterion = nn.MSELoss()
+        self.mse_loss = nn.MSELoss()
         self.start_time = None
 
     def _flatten_covariance(self, cov_batch):
-        batch_size = cov_batch.shape[0]
-        return cov_batch.reshape(batch_size, -1)
+        return cov_batch.reshape(cov_batch.size(0), -1)
+
+    def _pairwise_ranking_loss(self, pred, target):
+        """
+        Margin ranking loss: penalizes when the relative order of predictions
+        does not match the relative order of targets.
+        """
+        batch_size = pred.size(0)
+        if batch_size < 2:
+            return torch.tensor(0.0, device=pred.device)
+        # Compare all pairs
+        pred_diff = pred.unsqueeze(1) - pred.unsqueeze(0)
+        target_diff = target.unsqueeze(1) - target.unsqueeze(0)
+        # We want sign(pred_diff) == sign(target_diff)
+        loss = torch.mean(F.relu(-pred_diff * target_diff))
+        return loss
 
     def fit(self, X_train, y_train, X_val, y_val, epochs=100, batch_size=32, patience=10):
         self.start_time = time.time()
@@ -148,17 +138,13 @@ class NeuralOperatorTrainer:
                 batch_X, batch_y = batch_X.to(self.device), batch_y.to(self.device)
                 self.optimizer.zero_grad()
                 if self.model_type == "FNO":
-                    pred = self.model(batch_X)
-                    pred = pred.reshape(batch_X.size(0), -1)
-                elif self.model_type == "DeepONet":
-                    batch_X_flat = self._flatten_covariance(batch_X)
-                    n_pairs = batch_X.shape[1] * batch_X.shape[2]
-                    trunk = torch.arange(n_pairs, device=self.device).float().unsqueeze(0).expand(batch_X.size(0), -1)
-                    pred = self.model(batch_X_flat, trunk)
+                    pred = self.model(batch_X).reshape(batch_X.size(0), -1)
                 else:
                     batch_X_flat = self._flatten_covariance(batch_X)
                     pred = self.model(batch_X_flat)
-                loss = self.criterion(pred, batch_y)
+                mse = self.mse_loss(pred, batch_y)
+                rank_loss = self._pairwise_ranking_loss(pred, batch_y)
+                loss = mse + self.ranking_weight * rank_loss
                 loss.backward()
                 self.optimizer.step()
                 train_loss += loss.item() * batch_X.size(0)
@@ -170,15 +156,12 @@ class NeuralOperatorTrainer:
                 y_val_t = torch.tensor(y_val, dtype=torch.float32).to(self.device)
                 if self.model_type == "FNO":
                     pred_val = self.model(X_val_t).reshape(X_val.shape[0], -1)
-                elif self.model_type == "DeepONet":
-                    X_val_flat = self._flatten_covariance(X_val_t)
-                    n_pairs = X_val.shape[1] * X_val.shape[2]
-                    trunk = torch.arange(n_pairs, device=self.device).float().unsqueeze(0).expand(X_val.shape[0], -1)
-                    pred_val = self.model(X_val_flat, trunk)
                 else:
                     X_val_flat = self._flatten_covariance(X_val_t)
                     pred_val = self.model(X_val_flat)
-                val_loss = self.criterion(pred_val, y_val_t).item()
+                val_loss = self.mse_loss(pred_val, y_val_t).item()
+                # Compute prediction variance as a diagnostic
+                pred_var = pred_val.var(dim=0).mean().item()
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -191,7 +174,7 @@ class NeuralOperatorTrainer:
                     break
 
             if (epoch+1) % 20 == 0:
-                print(f"    Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}")
+                print(f"    Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}, Pred Var: {pred_var:.6f}")
 
             if time.time() - self.start_time > config.MAX_RUNTIME_SECONDS:
                 print(f"    Max runtime exceeded. Switching to fallback model: {config.FALLBACK_MODEL}")
@@ -208,11 +191,6 @@ class NeuralOperatorTrainer:
         with torch.no_grad():
             if self.model_type == "FNO":
                 pred = self.model(X_t).reshape(X.shape[0], -1).cpu().numpy()
-            elif self.model_type == "DeepONet":
-                X_flat = self._flatten_covariance(X_t)
-                n_pairs = X.shape[1] * X.shape[2]
-                trunk = torch.arange(n_pairs, device=self.device).float().unsqueeze(0).expand(X.shape[0], -1)
-                pred = self.model(X_flat, trunk).cpu().numpy()
             else:
                 X_flat = self._flatten_covariance(X_t)
                 pred = self.model(X_flat).cpu().numpy()
