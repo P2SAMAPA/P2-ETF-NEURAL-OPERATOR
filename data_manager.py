@@ -68,6 +68,26 @@ def compute_margrabe_price(S1: float, S2: float, sigma1: float, sigma2: float, r
     price = S1 * norm.cdf(d1) - S2 * norm.cdf(d2)
     return max(price, 0.0)
 
+def compute_margrabe_prices_from_cov(cov: np.ndarray, current_prices: np.ndarray, tickers: list) -> np.ndarray:
+    """Analytical Margrabe prices from a single covariance matrix."""
+    n_assets = len(tickers)
+    cov_annual = cov * 252
+    vols = np.sqrt(np.maximum(np.diag(cov_annual), 1e-12))
+    corr = cov_annual / np.outer(vols, vols + 1e-12)
+    np.fill_diagonal(corr, 1.0)
+    corr = np.clip(corr, -1.0, 1.0)
+    prices = np.zeros((n_assets, n_assets))
+    for i in range(n_assets):
+        for j in range(n_assets):
+            if i == j:
+                prices[i, j] = 0.0
+            else:
+                prices[i, j] = compute_margrabe_price(
+                    current_prices[i], current_prices[j], vols[i], vols[j], corr[i, j],
+                    T=config.TIME_TO_MATURITY, r=config.RISK_FREE_RATE
+                )
+    return prices
+
 def generate_training_data(returns: pd.DataFrame, window: int = 63) -> tuple:
     """
     Generate input (covariance surface) and target (pairwise Margrabe prices) for training.
