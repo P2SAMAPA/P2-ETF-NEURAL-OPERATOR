@@ -1,5 +1,5 @@
 """
-Neural Operator models: Fourier Neural Operator (FNO) with ranking loss.
+Neural Operator models: Fourier Neural Operator (FNO) with improved training.
 """
 
 import torch
@@ -66,21 +66,6 @@ class FNO2d(nn.Module):
         x = self.fc2(x).squeeze(-1)
         return x
 
-class MLPRegressor(nn.Module):
-    def __init__(self, input_dim, hidden_dims=[256, 128, 64]):
-        super().__init__()
-        layers = []
-        prev_dim = input_dim
-        for h_dim in hidden_dims:
-            layers.append(nn.Linear(prev_dim, h_dim))
-            layers.append(nn.ReLU())
-            prev_dim = h_dim
-        layers.append(nn.Linear(prev_dim, 1))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.net(x).squeeze(-1)
-
 class NeuralOperatorTrainer:
     def __init__(self, model_type="FNO", n_assets=23, modes=16, width=64, n_layers=4,
                  lr=0.001, weight_decay=1e-4, ranking_weight=0.3, seed=42):
@@ -96,35 +81,44 @@ class NeuralOperatorTrainer:
             self.model = FNO2d(effective_modes, effective_modes, width, n_layers, padding=0.1).to(self.device)
         else:
             input_dim = n_assets * n_assets
-            self.model = MLPRegressor(input_dim, hidden_dims=[256, 128, 64]).to(self.device)
+            self.model = nn.Sequential(
+                nn.Linear(input_dim, 256),
+                nn.ReLU(),
+                nn.Linear(256, 128),
+                nn.ReLU(),
+                nn.Linear(128, 1)
+            ).to(self.device)
 
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay)
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=10)
         self.mse_loss = nn.MSELoss()
         self.start_time = None
+        self.target_means = None
+        self.target_stds = None
 
     def _flatten_covariance(self, cov_batch):
         return cov_batch.reshape(cov_batch.size(0), -1)
 
     def _pairwise_ranking_loss(self, pred, target):
-        """
-        Margin ranking loss: penalizes when the relative order of predictions
-        does not match the relative order of targets.
-        """
         batch_size = pred.size(0)
         if batch_size < 2:
             return torch.tensor(0.0, device=pred.device)
-        # Compare all pairs
         pred_diff = pred.unsqueeze(1) - pred.unsqueeze(0)
         target_diff = target.unsqueeze(1) - target.unsqueeze(0)
-        # We want sign(pred_diff) == sign(target_diff)
         loss = torch.mean(F.relu(-pred_diff * target_diff))
         return loss
 
     def fit(self, X_train, y_train, X_val, y_val, epochs=100, batch_size=32, patience=10):
         self.start_time = time.time()
-        self.model.train()
+        
+        # Normalize targets per output dimension (asset pair)
+        self.target_means = y_train.mean(axis=0, keepdims=True)
+        self.target_stds = y_train.std(axis=0, keepdims=True) + 1e-8
+        y_train_norm = (y_train - self.target_means) / self.target_stds
+        y_val_norm = (y_val - self.target_means) / self.target_stds
+
         dataset = torch.utils.data.TensorDataset(torch.tensor(X_train, dtype=torch.float32),
-                                                  torch.tensor(y_train, dtype=torch.float32))
+                                                  torch.tensor(y_train_norm, dtype=torch.float32))
         loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
         best_val_loss = float('inf')
@@ -136,16 +130,21 @@ class NeuralOperatorTrainer:
             train_loss = 0.0
             for batch_X, batch_y in loader:
                 batch_X, batch_y = batch_X.to(self.device), batch_y.to(self.device)
+                # Add small Gaussian noise to targets for regularization
+                noise = torch.randn_like(batch_y) * 0.01
+                batch_y_noisy = batch_y + noise
+                
                 self.optimizer.zero_grad()
                 if self.model_type == "FNO":
                     pred = self.model(batch_X).reshape(batch_X.size(0), -1)
                 else:
                     batch_X_flat = self._flatten_covariance(batch_X)
                     pred = self.model(batch_X_flat)
-                mse = self.mse_loss(pred, batch_y)
+                mse = self.mse_loss(pred, batch_y_noisy)
                 rank_loss = self._pairwise_ranking_loss(pred, batch_y)
                 loss = mse + self.ranking_weight * rank_loss
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 self.optimizer.step()
                 train_loss += loss.item() * batch_X.size(0)
             train_loss /= len(dataset)
@@ -153,15 +152,16 @@ class NeuralOperatorTrainer:
             self.model.eval()
             with torch.no_grad():
                 X_val_t = torch.tensor(X_val, dtype=torch.float32).to(self.device)
-                y_val_t = torch.tensor(y_val, dtype=torch.float32).to(self.device)
+                y_val_t = torch.tensor(y_val_norm, dtype=torch.float32).to(self.device)
                 if self.model_type == "FNO":
                     pred_val = self.model(X_val_t).reshape(X_val.shape[0], -1)
                 else:
                     X_val_flat = self._flatten_covariance(X_val_t)
                     pred_val = self.model(X_val_flat)
                 val_loss = self.mse_loss(pred_val, y_val_t).item()
-                # Compute prediction variance as a diagnostic
                 pred_var = pred_val.var(dim=0).mean().item()
+            
+            self.scheduler.step(val_loss)
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -178,7 +178,6 @@ class NeuralOperatorTrainer:
 
             if time.time() - self.start_time > config.MAX_RUNTIME_SECONDS:
                 print(f"    Max runtime exceeded. Switching to fallback model: {config.FALLBACK_MODEL}")
-                self.model_type = config.FALLBACK_MODEL
                 return False
 
         if best_state:
@@ -194,4 +193,7 @@ class NeuralOperatorTrainer:
             else:
                 X_flat = self._flatten_covariance(X_t)
                 pred = self.model(X_flat).cpu().numpy()
+        # Denormalize predictions
+        if self.target_means is not None:
+            pred = pred * self.target_stds + self.target_means
         return pred
