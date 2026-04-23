@@ -26,15 +26,11 @@ def run_neural_operator():
         if len(returns) < config.MIN_OBSERVATIONS:
             continue
 
-        # Generate full training data (covariance surfaces + Margrabe prices)
         print("  Generating training data...")
         X, y = data_manager.generate_training_data(returns, window=63)
         n_samples, n_assets, _ = X.shape
-
-        # Flatten targets to (n_samples, n_assets * n_assets) for training
         y = y.reshape(n_samples, -1)
 
-        # Train/validation split
         X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=config.VALIDATION_SPLIT, random_state=config.RANDOM_SEED)
 
         trainer = NeuralOperatorTrainer(
@@ -45,6 +41,7 @@ def run_neural_operator():
             n_layers=config.FNO_N_LAYERS,
             lr=config.LEARNING_RATE,
             weight_decay=config.WEIGHT_DECAY,
+            ranking_weight=config.RANKING_LOSS_WEIGHT,
             seed=config.RANDOM_SEED
         )
 
@@ -53,15 +50,27 @@ def run_neural_operator():
                               batch_size=config.BATCH_SIZE, patience=config.EARLY_STOP_PATIENCE)
 
         # Predict on the most recent covariance
-        latest_cov = X[-1:]  # (1, n_assets, n_assets)
+        latest_cov = X[-1:]
         pred_prices = trainer.predict(latest_cov).flatten().reshape(n_assets, n_assets)
 
-        # Derive ETF scores: average exchange option price when used as asset 1 (higher is better)
+        # Use benchmark-relative scoring: predicted exchange price when exchanging for SPY (or first equity)
+        if "SPY" in tickers:
+            benchmark_idx = tickers.index("SPY")
+        elif "TLT" in tickers:
+            benchmark_idx = tickers.index("TLT")
+        else:
+            benchmark_idx = 0
+
         scores = {}
         for i, ticker in enumerate(tickers):
-            # Average price when exchanging this ETF for any other
-            avg_price = np.mean(pred_prices[i, :])
-            scores[ticker] = avg_price
+            # Score = predicted price of exchanging benchmark for this ETF
+            # Higher means this ETF is more valuable relative to benchmark
+            score = pred_prices[benchmark_idx, i]
+            scores[ticker] = float(score)
+
+        # Diagnostic: print score variance
+        score_values = list(scores.values())
+        print(f"  Score variance: {np.var(score_values):.6f}, range: [{np.min(score_values):.4f}, {np.max(score_values):.4f}]")
 
         sorted_tickers = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         top_picks[universe_name] = [
