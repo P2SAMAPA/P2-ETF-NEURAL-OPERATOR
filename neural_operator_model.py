@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import time
+import config  # <-- Add this import
 
 class SpectralConv2d(nn.Module):
     def __init__(self, in_channels, out_channels, modes1, modes2):
@@ -148,7 +149,7 @@ class NeuralOperatorTrainer:
                 self.optimizer.zero_grad()
                 if self.model_type == "FNO":
                     pred = self.model(batch_X)
-                    pred = pred.reshape(batch_X.size(0), -1)   # flatten to (batch, n_assets*n_assets)
+                    pred = pred.reshape(batch_X.size(0), -1)
                 elif self.model_type == "DeepONet":
                     batch_X_flat = self._flatten_covariance(batch_X)
                     n_pairs = batch_X.shape[1] * batch_X.shape[2]
