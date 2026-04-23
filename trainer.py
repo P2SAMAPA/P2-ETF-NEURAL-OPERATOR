@@ -49,11 +49,16 @@ def run_neural_operator():
         success = trainer.fit(X_train, y_train, X_val, y_val, epochs=config.EPOCHS,
                               batch_size=config.BATCH_SIZE, patience=config.EARLY_STOP_PATIENCE)
 
-        # Predict on the most recent covariance
-        latest_cov = X[-1:]
-        pred_prices = trainer.predict(latest_cov).flatten().reshape(n_assets, n_assets)
+        if not success:
+            print("  FNO training failed or timed out. Falling back to analytical scoring.")
+            # Fallback: use latest covariance to compute analytical scores
+            latest_cov = X[-1]
+            pred_prices = data_manager.compute_margrabe_prices_from_cov(latest_cov, returns.iloc[-1].values, tickers)
+        else:
+            latest_cov = X[-1:]
+            pred_prices = trainer.predict(latest_cov).flatten().reshape(n_assets, n_assets)
 
-        # Use benchmark-relative scoring: predicted exchange price when exchanging for SPY (or first equity)
+        # Benchmark-relative scoring
         if "SPY" in tickers:
             benchmark_idx = tickers.index("SPY")
         elif "TLT" in tickers:
@@ -63,12 +68,9 @@ def run_neural_operator():
 
         scores = {}
         for i, ticker in enumerate(tickers):
-            # Score = predicted price of exchanging benchmark for this ETF
-            # Higher means this ETF is more valuable relative to benchmark
             score = pred_prices[benchmark_idx, i]
             scores[ticker] = float(score)
 
-        # Diagnostic: print score variance
         score_values = list(scores.values())
         print(f"  Score variance: {np.var(score_values):.6f}, range: [{np.min(score_values):.4f}, {np.max(score_values):.4f}]")
 
