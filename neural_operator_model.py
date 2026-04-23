@@ -8,9 +8,6 @@ import torch.nn.functional as F
 import numpy as np
 import time
 
-# ------------------------------------------------------------------------------
-# 1. Fourier Neural Operator (FNO)
-# ------------------------------------------------------------------------------
 class SpectralConv2d(nn.Module):
     def __init__(self, in_channels, out_channels, modes1, modes2):
         super().__init__()
@@ -24,11 +21,12 @@ class SpectralConv2d(nn.Module):
 
     def forward(self, x):
         batchsize = x.shape[0]
-        # x shape: (batch, in_channels, H, W)
         x_ft = torch.fft.rfft2(x)
         out_ft = torch.zeros(batchsize, self.out_channels, x.size(-2), x.size(-1)//2 + 1, dtype=torch.cfloat, device=x.device)
-        out_ft[:, :, :self.modes1, :self.modes2] = self.compl_mul2d(x_ft[:, :, :self.modes1, :self.modes2], self.weights1)
-        out_ft[:, :, -self.modes1:, :self.modes2] = self.compl_mul2d(x_ft[:, :, -self.modes1:, :self.modes2], self.weights2)
+        m1 = min(self.modes1, x_ft.size(-2))
+        m2 = min(self.modes2, x_ft.size(-1))
+        out_ft[:, :, :m1, :m2] = self.compl_mul2d(x_ft[:, :, :m1, :m2], self.weights1[:, :, :m1, :m2])
+        out_ft[:, :, -m1:, :m2] = self.compl_mul2d(x_ft[:, :, -m1:, :m2], self.weights2[:, :, :m1, :m2])
         x = torch.fft.irfft2(out_ft, s=(x.size(-2), x.size(-1)))
         return x
 
@@ -49,11 +47,12 @@ class FNO2d(nn.Module):
         self.fc2 = nn.Linear(128, 1)
 
     def forward(self, x):
-        # x shape: (batch, H, W)
         batchsize, H, W = x.shape
-        x = x.unsqueeze(1)  # (batch, 1, H, W)
+        x = x.unsqueeze(1)
         x = self.fc0(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
-        x = F.pad(x, [0, int(self.padding * W), 0, int(self.padding * H)])
+        pad_h = int(self.padding * H)
+        pad_w = int(self.padding * W)
+        x = F.pad(x, [0, pad_w, 0, pad_h])
         for conv, w in zip(self.convs, self.ws):
             x1 = conv(x)
             x2 = w(x)
@@ -66,9 +65,6 @@ class FNO2d(nn.Module):
         x = self.fc2(x).squeeze(-1)
         return x
 
-# ------------------------------------------------------------------------------
-# 2. DeepONet (Operator Network)
-# ------------------------------------------------------------------------------
 class DeepONet(nn.Module):
     def __init__(self, branch_input_dim, trunk_input_dim=1, hidden_dim=128, n_layers=3):
         super().__init__()
@@ -87,15 +83,10 @@ class DeepONet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x_branch, x_trunk):
-        # x_branch: (batch, branch_input_dim) – flattened covariance
-        # x_trunk: (batch, trunk_input_dim) – coordinates (i, j)
-        b = self.branch_net(x_branch)  # (batch, hidden_dim)
-        t = self.trunk_net(x_trunk)    # (batch, hidden_dim)
+        b = self.branch_net(x_branch)
+        t = self.trunk_net(x_trunk)
         return torch.sum(b * t, dim=1, keepdim=True) + self.final_bias
 
-# ------------------------------------------------------------------------------
-# 3. Simple MLP Fallback
-# ------------------------------------------------------------------------------
 class MLPRegressor(nn.Module):
     def __init__(self, input_dim, hidden_dims=[256, 128, 64]):
         super().__init__()
@@ -111,9 +102,6 @@ class MLPRegressor(nn.Module):
     def forward(self, x):
         return self.net(x).squeeze(-1)
 
-# ------------------------------------------------------------------------------
-# 4. Trainer wrapper
-# ------------------------------------------------------------------------------
 class NeuralOperatorTrainer:
     def __init__(self, model_type="FNO", n_assets=23, modes=16, width=64, n_layers=4,
                  lr=0.001, weight_decay=1e-4, seed=42):
@@ -124,11 +112,12 @@ class NeuralOperatorTrainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         if model_type == "FNO":
-            self.model = FNO2d(modes, modes, width, n_layers, padding=0.1).to(self.device)
+            effective_modes = min(modes, n_assets // 2 + 1)
+            self.model = FNO2d(effective_modes, effective_modes, width, n_layers, padding=0.1).to(self.device)
         elif model_type == "DeepONet":
             branch_dim = n_assets * n_assets
             self.model = DeepONet(branch_dim, trunk_input_dim=2, hidden_dim=width, n_layers=n_layers).to(self.device)
-        else:  # MLP fallback
+        else:
             input_dim = n_assets * n_assets
             self.model = MLPRegressor(input_dim, hidden_dims=[256, 128, 64]).to(self.device)
 
@@ -137,7 +126,6 @@ class NeuralOperatorTrainer:
         self.start_time = None
 
     def _flatten_covariance(self, cov_batch):
-        """Flatten covariance matrices for DeepONet/MLP."""
         batch_size = cov_batch.shape[0]
         return cov_batch.reshape(batch_size, -1)
 
@@ -153,7 +141,6 @@ class NeuralOperatorTrainer:
         best_state = None
 
         for epoch in range(epochs):
-            # Training
             self.model.train()
             train_loss = 0.0
             for batch_X, batch_y in loader:
@@ -175,7 +162,6 @@ class NeuralOperatorTrainer:
                 train_loss += loss.item() * batch_X.size(0)
             train_loss /= len(dataset)
 
-            # Validation
             self.model.eval()
             with torch.no_grad():
                 X_val_t = torch.tensor(X_val, dtype=torch.float32).to(self.device)
@@ -205,7 +191,6 @@ class NeuralOperatorTrainer:
             if (epoch+1) % 20 == 0:
                 print(f"    Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}")
 
-            # Runtime check for fallback
             if time.time() - self.start_time > config.MAX_RUNTIME_SECONDS:
                 print(f"    Max runtime exceeded. Switching to fallback model: {config.FALLBACK_MODEL}")
                 self.model_type = config.FALLBACK_MODEL
