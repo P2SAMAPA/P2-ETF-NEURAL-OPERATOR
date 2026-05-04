@@ -80,13 +80,19 @@ class NeuralOperatorTrainer:
             effective_modes = min(modes, n_assets // 2 + 1)
             self.model = FNO2d(effective_modes, effective_modes, width, n_layers, padding=0.1).to(self.device)
         else:
-            input_dim = n_assets * n_assets
+            # FIX: MLP fallback output must match n_assets² (not 1)
+            input_dim  = n_assets * n_assets
+            output_dim = n_assets * n_assets
             self.model = nn.Sequential(
                 nn.Linear(input_dim, 256),
-                nn.ReLU(),
-                nn.Linear(256, 128),
-                nn.ReLU(),
-                nn.Linear(128, 1)
+                nn.GELU(),
+                nn.LayerNorm(256),
+                nn.Dropout(0.1),
+                nn.Linear(256, 256),
+                nn.GELU(),
+                nn.LayerNorm(256),
+                nn.Dropout(0.1),
+                nn.Linear(256, output_dim)
             ).to(self.device)
 
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
